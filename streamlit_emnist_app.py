@@ -15,7 +15,7 @@ from sklearn.tree import DecisionTreeClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.decomposition import IncrementalPCA
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, cross_val_score, StratifiedKFold
 from skimage.feature import hog
 from scipy.ndimage import gaussian_filter
 
@@ -452,13 +452,114 @@ def train_model_custom(X_train_data, y_train_data, model_type, hyperparams):
         model.fit(X_train_data, y_train_data)
     return model
 
+def perform_cross_validation(X_data, y_data, model_type, hyperparams, n_folds=5):
+    """Perform cross-validation and return scores."""
+    if model_type == "Decision Tree":
+        model = DecisionTreeClassifier(**hyperparams)
+    else:
+        if 'class_weight' not in hyperparams:
+            hyperparams['class_weight'] = 'balanced'
+        model = RandomForestClassifier(**hyperparams)
+    
+    cv = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+    
+    with st.spinner(f"Performing {n_folds}-Fold Cross-Validation on {model_type}..."):
+        cv_scores = cross_val_score(model, X_data, y_data, cv=cv, scoring='accuracy', n_jobs=-1)
+    
+    return cv_scores
+
+def plot_cv_results(cv_results_list):
+    """Plot cross-validation results comparison."""
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6))
+    
+    # Box plot for all models
+    data_for_plot = []
+    labels_for_plot = []
+    
+    for result in cv_results_list:
+        data_for_plot.append(result['scores'])
+        label = f"{result['model']}\n{result['features']}"
+        labels_for_plot.append(label)
+    
+    bp = axes[0].boxplot(data_for_plot, labels=labels_for_plot, patch_artist=True)
+    
+    # Color the boxes
+    colors = plt.cm.Set3(np.linspace(0, 1, len(data_for_plot)))
+    for patch, color in zip(bp['boxes'], colors):
+        patch.set_facecolor(color)
+    
+    axes[0].set_ylabel('Accuracy Score', fontsize=12, fontweight='bold')
+    axes[0].set_title('Cross-Validation Score Distribution', fontsize=14, fontweight='bold')
+    axes[0].grid(axis='y', alpha=0.3, linestyle='--')
+    axes[0].tick_params(axis='x', rotation=15)
+    
+    # Bar plot with mean and std
+    means = [result['mean'] for result in cv_results_list]
+    stds = [result['std'] for result in cv_results_list]
+    x_pos = np.arange(len(labels_for_plot))
+    
+    bars = axes[1].bar(x_pos, means, yerr=stds, capsize=5, color=colors, 
+                       edgecolor='black', linewidth=1.2, alpha=0.8)
+    
+    axes[1].set_ylabel('Mean Accuracy', fontsize=12, fontweight='bold')
+    axes[1].set_title('Cross-Validation Mean Accuracy ± Std', fontsize=14, fontweight='bold')
+    axes[1].set_xticks(x_pos)
+    axes[1].set_xticklabels(labels_for_plot, rotation=15, ha='right')
+    axes[1].grid(axis='y', alpha=0.3, linestyle='--')
+    axes[1].set_ylim(0, 1.1)
+    
+    # Add value labels
+    for i, (mean, std) in enumerate(zip(means, stds)):
+        axes[1].text(i, mean + std + 0.02, f'{mean:.3f}±{std:.3f}', 
+                    ha='center', va='bottom', fontsize=9, fontweight='bold')
+    
+    plt.tight_layout()
+    return fig
+
+def plot_cv_fold_details(cv_results_list):
+    """Plot detailed fold-by-fold comparison."""
+    n_models = len(cv_results_list)
+    n_folds = len(cv_results_list[0]['scores'])
+    
+    fig, ax = plt.subplots(figsize=(14, 7))
+    
+    x = np.arange(n_folds)
+    width = 0.8 / n_models
+    
+    colors = plt.cm.Set2(np.linspace(0, 1, n_models))
+    
+    for i, result in enumerate(cv_results_list):
+        offset = (i - n_models/2 + 0.5) * width
+        label = f"{result['model']} - {result['features']}"
+        bars = ax.bar(x + offset, result['scores'], width, label=label, 
+                     color=colors[i], edgecolor='black', linewidth=1)
+        
+        # Add value labels on bars
+        for bar in bars:
+            height = bar.get_height()
+            ax.text(bar.get_x() + bar.get_width()/2., height,
+                   f'{height:.3f}',
+                   ha='center', va='bottom', fontsize=8, rotation=0)
+    
+    ax.set_xlabel('Fold Number', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Accuracy Score', fontsize=12, fontweight='bold')
+    ax.set_title('Cross-Validation Scores by Fold', fontsize=14, fontweight='bold')
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'Fold {i+1}' for i in range(n_folds)])
+    ax.legend(loc='best', fontsize=10)
+    ax.grid(axis='y', alpha=0.3, linestyle='--')
+    ax.set_ylim(0, 1.1)
+    
+    plt.tight_layout()
+    return fig
+
 # ============================================================================
 # MAIN APPLICATION
 # ============================================================================
 
 def main():
     st.title("🔤 EMNIST Character Classifier")
-    st.markdown("### Advanced Image Classification with Feature Engineering")
+    st.markdown("### Advanced Image Classification with Feature Engineering & Cross-Validation")
     st.markdown("---")
     
     # Load models and label mapping
@@ -607,6 +708,12 @@ def main():
             ["Raw Pixels Only", "Feature Engineering (HOG + Stats + PCA)", "Both"]
         )
         
+        # Cross-validation settings
+        st.markdown("### 🔀 Cross-Validation Settings")
+        enable_cv = st.checkbox("Enable Cross-Validation", value=True)
+        if enable_cv:
+            n_folds = st.slider("Number of Folds", min_value=3, max_value=10, value=5, step=1)
+        
         # Hyperparameters
         st.markdown("### ⚙️ Hyperparameters")
         
@@ -645,7 +752,7 @@ def main():
                 unique, counts = np.unique(y_train, return_counts=True)
                 st.info(f"📊 Class distribution: min={counts.min()}, max={counts.max()}, mean={counts.mean():.0f}")
                 
-                # Split into train and test
+                # Split into train and test (keep 0.2 as specified)
                 X_train_split, X_test, y_train_split, y_test = train_test_split(
                     X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
                 )
@@ -682,6 +789,7 @@ def main():
                 # Train models
                 models_to_train = ["Decision Tree", "Random Forest"] if train_both else [model_choice]
                 results = []
+                cv_results_all = []
                 
                 for model_type in models_to_train:
                     # Set hyperparameters
@@ -706,12 +814,45 @@ def main():
                     if feature_mode in ["Raw Pixels Only", "Both"]:
                         st.markdown(f"### Training {model_type} on Raw Pixels")
                         
-                        # Train model
+                        # Cross-validation BEFORE training
+                        if enable_cv:
+                            st.markdown("#### 🔀 Cross-Validation Results")
+                            cv_scores = perform_cross_validation(X_train_raw, y_train_split, model_type, hyperparams, n_folds)
+                            
+                            cv_mean = np.mean(cv_scores)
+                            cv_std = np.std(cv_scores)
+                            
+                            # Store CV results
+                            cv_results_all.append({
+                                'model': model_type,
+                                'features': 'Raw Pixels',
+                                'scores': cv_scores,
+                                'mean': cv_mean,
+                                'std': cv_std
+                            })
+                            
+                            # Display CV metrics
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("CV Mean Accuracy", f"{cv_mean:.2%}")
+                            with col2:
+                                st.metric("CV Std Deviation", f"{cv_std:.4f}")
+                            with col3:
+                                st.metric("CV Min-Max", f"{cv_scores.min():.2%} - {cv_scores.max():.2%}")
+                            
+                            # Show individual fold scores
+                            fold_data = pd.DataFrame({
+                                'Fold': [f'Fold {i+1}' for i in range(len(cv_scores))],
+                                'Accuracy': cv_scores
+                            })
+                            st.dataframe(fold_data.style.format({'Accuracy': '{:.4f}'}), use_container_width=True)
+                        
+                        # Train model on full training set
                         model_raw = train_model_custom(
                             X_train_raw, y_train_split, model_type, hyperparams
                         )
                         
-                        # Evaluate
+                        # Evaluate on test set
                         y_pred_train = model_raw.predict(X_train_raw)
                         y_pred_test = model_raw.predict(X_test_raw)
                         
@@ -745,24 +886,63 @@ def main():
                         joblib.dump(model_raw, model_filename)
                         st.success(f"✅ Saved to {model_filename}")
                         
-                        results.append({
+                        result_entry = {
                             'Model': model_type,
                             'Features': 'Raw Pixels',
                             'Train Accuracy': train_acc,
                             'Test Accuracy': test_acc,
                             'File': model_filename
-                        })
+                        }
+                        
+                        if enable_cv:
+                            result_entry['CV Mean'] = cv_mean
+                            result_entry['CV Std'] = cv_std
+                        
+                        results.append(result_entry)
                     
                     # Train on engineered features if selected
                     if feature_mode in ["Feature Engineering (HOG + Stats + PCA)", "Both"]:
                         st.markdown(f"### Training {model_type} on Engineered Features")
                         
-                        # Train model
+                        # Cross-validation BEFORE training
+                        if enable_cv:
+                            st.markdown("#### 🔀 Cross-Validation Results")
+                            cv_scores = perform_cross_validation(X_train_eng, y_train_split, model_type, hyperparams, n_folds)
+                            
+                            cv_mean = np.mean(cv_scores)
+                            cv_std = np.std(cv_scores)
+                            
+                            # Store CV results
+                            cv_results_all.append({
+                                'model': model_type,
+                                'features': 'Feature Engineering',
+                                'scores': cv_scores,
+                                'mean': cv_mean,
+                                'std': cv_std
+                            })
+                            
+                            # Display CV metrics
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("CV Mean Accuracy", f"{cv_mean:.2%}")
+                            with col2:
+                                st.metric("CV Std Deviation", f"{cv_std:.4f}")
+                            with col3:
+                                st.metric("CV Min-Max", f"{cv_scores.min():.2%} - {cv_scores.max():.2%}")
+                            
+                            # Show individual fold scores
+                            fold_data = pd.DataFrame({
+                                'Fold': [f'Fold {i+1}' for i in range(len(cv_scores))],
+                                'Accuracy': cv_scores
+                            })
+                            st.dataframe(fold_data.style.format({'Accuracy': '{:.4f}'}), use_container_width=True)
+                        
+                        # Train model on full training set
                         model_eng = train_model_custom(
                             X_train_eng, y_train_split, model_type, hyperparams
                         )
                         
-                        # Evaluate
+                        # Evaluate on test set
                         y_pred_train = model_eng.predict(X_train_eng)
                         y_pred_test = model_eng.predict(X_test_eng)
                         
@@ -796,13 +976,60 @@ def main():
                         joblib.dump(model_eng, model_filename)
                         st.success(f"✅ Saved to {model_filename}")
                         
-                        results.append({
+                        result_entry = {
                             'Model': model_type,
                             'Features': 'Feature Engineering',
                             'Train Accuracy': train_acc,
                             'Test Accuracy': test_acc,
                             'File': model_filename
+                        }
+                        
+                        if enable_cv:
+                            result_entry['CV Mean'] = cv_mean
+                            result_entry['CV Std'] = cv_std
+                        
+                        results.append(result_entry)
+                
+                # Display Cross-Validation Summary
+                if enable_cv and len(cv_results_all) > 0:
+                    st.markdown("---")
+                    st.markdown("## 🔀 Cross-Validation Summary")
+                    
+                    # Create CV summary table
+                    cv_summary = []
+                    for cv_res in cv_results_all:
+                        cv_summary.append({
+                            'Model': cv_res['model'],
+                            'Features': cv_res['features'],
+                            'CV Mean': cv_res['mean'],
+                            'CV Std': cv_res['std'],
+                            'CV Min': cv_res['scores'].min(),
+                            'CV Max': cv_res['scores'].max()
                         })
+                    
+                    df_cv = pd.DataFrame(cv_summary)
+                    st.dataframe(
+                        df_cv.style.format({
+                            'CV Mean': '{:.4f}',
+                            'CV Std': '{:.4f}',
+                            'CV Min': '{:.4f}',
+                            'CV Max': '{:.4f}'
+                        }),
+                        use_container_width=True
+                    )
+                    
+                    # Plot CV results
+                    st.markdown("### 📊 Cross-Validation Visualizations")
+                    
+                    fig_cv = plot_cv_results(cv_results_all)
+                    st.pyplot(fig_cv)
+                    plt.close()
+                    
+                    # Plot fold-by-fold comparison
+                    st.markdown("### 📈 Fold-by-Fold Comparison")
+                    fig_folds = plot_cv_fold_details(cv_results_all)
+                    st.pyplot(fig_folds)
+                    plt.close()
                 
                 # Display results summary
                 st.markdown("---")
@@ -812,11 +1039,17 @@ def main():
                     df_results = pd.DataFrame(results)
                     
                     # Format and display table
+                    format_dict = {
+                        'Train Accuracy': '{:.2%}',
+                        'Test Accuracy': '{:.2%}'
+                    }
+                    
+                    if enable_cv:
+                        format_dict['CV Mean'] = '{:.4f}'
+                        format_dict['CV Std'] = '{:.4f}'
+                    
                     st.dataframe(
-                        df_results.style.format({
-                            'Train Accuracy': '{:.2%}',
-                            'Test Accuracy': '{:.2%}'
-                        }),
+                        df_results.style.format(format_dict),
                         use_container_width=True
                     )
                     
@@ -831,7 +1064,7 @@ def main():
                     if len(results) > 1:
                         st.markdown("### 📈 Model Comparison")
                         
-                        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
+                        fig, axes = plt.subplots(1, 2, figsize=(16, 6))
                         
                         # Accuracy comparison
                         df_melted = df_results.melt(
@@ -846,15 +1079,15 @@ def main():
                             x='Model',
                             y='Accuracy',
                             hue='Metric',
-                            ax=ax1
+                            ax=axes[0]
                         )
-                        ax1.set_title('Train vs Test Accuracy')
-                        ax1.set_ylim(0, 1.1)
-                        ax1.legend(title='Metric')
+                        axes[0].set_title('Train vs Test Accuracy', fontsize=14, fontweight='bold')
+                        axes[0].set_ylim(0, 1.1)
+                        axes[0].legend(title='Metric')
                         
                         # Add value labels
-                        for p in ax1.patches:
-                            ax1.annotate(
+                        for p in axes[0].patches:
+                            axes[0].annotate(
                                 f"{p.get_height():.2%}",
                                 (p.get_x() + p.get_width() / 2., p.get_height()),
                                 ha='center', va='center',
@@ -869,15 +1102,15 @@ def main():
                             x='Features',
                             y='Test Accuracy',
                             hue='Model',
-                            ax=ax2
+                            ax=axes[1]
                         )
-                        ax2.set_title('Test Accuracy by Features')
-                        ax2.set_ylim(0, 1.1)
-                        ax2.legend(title='Model')
+                        axes[1].set_title('Test Accuracy by Features', fontsize=14, fontweight='bold')
+                        axes[1].set_ylim(0, 1.1)
+                        axes[1].legend(title='Model')
                         
                         # Add value labels
-                        for p in ax2.patches:
-                            ax2.annotate(
+                        for p in axes[1].patches:
+                            axes[1].annotate(
                                 f"{p.get_height():.2%}",
                                 (p.get_x() + p.get_width() / 2., p.get_height()),
                                 ha='center', va='center',
@@ -889,8 +1122,6 @@ def main():
                         plt.tight_layout()
                         st.pyplot(fig)
                         plt.close()
-                    
-                    st.balloons()
                     
                     # Classification report expander
                     with st.expander("📋 Detailed Classification Report (Best Model)"):
